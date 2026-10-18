@@ -2,12 +2,18 @@
     ~/.stremio-local-addon/venv/bin/python -m unittest discover -s tests
 Skipped where libtorrent isn't installed. The engine's pure logic is run on stand-ins for libtorrent's handle.
 """
+import http.client
+import json
 import os
+import re
+import socket
 import sys
 import tempfile
 import threading
 import time
 import unittest
+import urllib.parse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -473,6 +479,67 @@ class ForLog(unittest.TestCase):
     def test_a_torrent_path_is_untouched(self):
         p = '/' + 'a' * 40 + '/0?tr=udp%3A%2F%2Ftracker.example%3A1337'
         self.assertEqual(ts.for_log(p), p)
+
+
+class AddonHost(BaseHTTPRequestHandler):
+    """A subtitle file at any path, except /video: 128 KB of zeros, in ranges."""
+    def do_GET(self):
+        if self.path == '/video':
+            m = re.fullmatch(r'bytes=(\d+)-(\d+)', self.headers.get('Range') or '')
+            body = bytes(int(m.group(2)) - int(m.group(1)) + 1 if m else 131072)
+            self.send_response(206 if m else 200)
+        else:
+            body = b'1\n00:00:01,000 --> 00:00:02,500\nHello\n'
+            self.send_response(200)
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        if self.command != 'HEAD':
+            self.wfile.write(body)
+
+    do_HEAD = do_GET
+
+    def log_message(self, *a):
+        pass
+
+
+class StremioClosed(unittest.TestCase):
+    """Stremio's server (the upstream) refuses connections, as it does while Stremio desktop is closed."""
+    def setUp(self):
+        s = socket.socket()
+        s.bind(('127.0.0.1', 0))
+        closed = s.getsockname()[1]
+        s.close()
+        patch = mock.patch.dict(ts.CONFIG, {'upstream': f'127.0.0.1:{closed}'})
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.subs = ThreadingHTTPServer(('127.0.0.1', 0), AddonHost)
+        self.server = ThreadingHTTPServer(('127.0.0.1', 0), ts.Handler)
+        for srv in (self.subs, self.server):
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            self.addCleanup(srv.server_close)
+            self.addCleanup(srv.shutdown)
+
+    def get(self, path):
+        conn = http.client.HTTPConnection('127.0.0.1', self.server.server_port, timeout=10)
+        self.addCleanup(conn.close)
+        conn.request('GET', path)
+        r = conn.getresponse()
+        return r.status, r.read()
+
+    def test_an_addons_subtitles_still_reach_the_tv(self):
+        src = urllib.parse.quote(f'http://127.0.0.1:{self.subs.server_port}/file/1962434148', safe='')
+        status, body = self.get(f'/subtitles.vtt?from={src}')
+        self.assertEqual(status, 200)
+        self.assertEqual(body, b'WEBVTT\n\n0\n00:00:01.000 --> 00:00:02.500\nHello\n\n')
+
+    def test_the_videos_hash_for_subtitle_addons(self):
+        src = urllib.parse.quote(f'http://127.0.0.1:{self.subs.server_port}/video', safe='')
+        status, body = self.get(f'/opensubHash?videoUrl={src}')
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), {'error': None, 'result': {'size': 131072, 'hash': '0000000000020000'}})
+
+    def test_other_routes_say_the_server_is_unreachable(self):
+        self.assertEqual(self.get('/hlsv2/probe')[0], 502)
 
 
 if __name__ == '__main__':

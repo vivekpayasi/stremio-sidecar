@@ -40,6 +40,7 @@ from dashboard import PAGE as DASHBOARD_PAGE, Dashboard, cached_progress, last_t
 from prefetch import Prefetcher
 from storage import EXTERNAL_DIR, Places, allocate, covers, file_paths, move_folder, resume_progress
 from stream_facts import FFPROBE, FactStore, Prober, ffprobe_runner
+from subtitles import subtitle_file, video_hash
 
 HOME = Path.home()
 INSTALL_DIR = HOME / '.stremio-local-addon'
@@ -1744,6 +1745,11 @@ class Handler(BaseHTTPRequestHandler):
             r = conn.getresponse()
         except OSError as e:
             conn.close()
+            path = urllib.parse.urlsplit(self.path).path
+            if path in ('/subtitles.srt', '/subtitles.vtt') and self.command in ('GET', 'HEAD'):
+                return self.subtitles(path.endswith('.vtt'))
+            if path == '/opensubHash' and self.command in ('GET', 'HEAD'):
+                return self.opensub_hash()
             saved = self._remembered().get(key) if key else None
             if saved:
                 # Stremio desktop is closed: answer from the last time it was up, so the TV keeps
@@ -1798,6 +1804,34 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True           # upstream ended mid-body
         finally:
             conn.close()
+
+    def subtitles(self, vtt):
+        """/subtitles.srt|vtt?from=<url>&offset=<ms> while Stremio desktop is closed: an addon's subtitle file, which
+        the TV only ever loads through the streaming server, converted here as Stremio's server would (subtitles.py)."""
+        q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        url = (q.get('from') or [''])[0]
+        try:
+            offset = int((q.get('offset') or ['0'])[0])
+        except ValueError:
+            offset = 0
+        try:
+            body = subtitle_file(url, vtt, offset)
+        except (OSError, ValueError) as e:
+            log(f'subtitles from {for_log(url)[:160]} failed: {e}')
+            return self.json({'error': f'subtitles: {e}'}, 502)
+        return self.send_bytes(200, 'text/vtt; charset=utf-8' if vtt else 'application/x-subrip; charset=utf-8', body,
+                               {'Access-Control-Allow-Origin': '*'})
+
+    def opensub_hash(self):
+        """/opensubHash?videoUrl=<url> while Stremio desktop is closed: the video's OpenSubtitles hash, which the TV
+        passes to subtitle addons so they can offer subtitles timed for this very release (subtitles.py). A torrent's
+        own URL reads back through this server, from this Mac's address, so it doesn't count as the TV playing."""
+        url = (urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).get('videoUrl') or [''])[0]
+        try:
+            return self.json({'error': None, 'result': video_hash(url)})
+        except (OSError, ValueError) as e:
+            log(f'opensubHash of {for_log(url)[:160]} failed: {e}')
+            return self.json({'error': str(e)}, 500)
 
 
 class FastBind:

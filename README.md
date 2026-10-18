@@ -117,7 +117,10 @@ this. Torrent results from every addon (Torrentio, MediaFusion, AIOStreams…) g
   **15 GB**, or whenever the disk drops below 3 GB free. Change the limit on the dashboard, under **Storage**.
 - Downloads for later can go to an external drive instead (see below).
 - If Stremio desktop is closed, torrents still play (the TV's status checks are answered from the last
-  time it was open); only transcoding and subtitle conversion need it running.
+  time it was open), and subtitles from addons such as OpenSubtitles still show: the TV loads them
+  through the streaming server, so the torrent server fetches and converts them itself, as Stremio's
+  would. It also works out the video's OpenSubtitles hash, which lets those addons offer subtitles
+  timed for the exact release you're playing. Only transcoding needs Stremio running.
 
 - MP4s whose subtitle tracks are stored far from their video (some releases put them all at the end of
   the file) get those tracks hidden: ExoPlayer reads every track, selected or not, and would otherwise
